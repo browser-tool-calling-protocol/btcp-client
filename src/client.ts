@@ -1,5 +1,6 @@
 /**
- * BTCP Client - WebSocket client for Browser Tool Calling Protocol
+ * BTCP Client - HTTP Streaming client for Browser Tool Calling Protocol
+ * Uses SSE for server→client, POST for client→server (more bandwidth efficient than WebSocket)
  */
 
 import {
@@ -31,7 +32,7 @@ import {
 import { ToolExecutor } from './executor.js';
 
 const DEFAULT_CONFIG: Required<BTCPClientConfig> = {
-  serverUrl: 'ws://localhost:8765',
+  serverUrl: 'http://localhost:8765',
   sessionId: '',
   version: '1.0.0',
   autoReconnect: true,
@@ -41,19 +42,12 @@ const DEFAULT_CONFIG: Required<BTCPClientConfig> = {
   debug: false,
 };
 
-type WebSocketLike = {
-  readyState: number;
-  send(data: string): void;
-  close(code?: number, reason?: string): void;
-  onopen: ((ev: unknown) => void) | null;
-  onclose: ((ev: { code: number; reason: string }) => void) | null;
-  onerror: ((ev: { message?: string }) => void) | null;
-  onmessage: ((ev: { data: string }) => void) | null;
-};
+// EventSource polyfill for Node.js
+let EventSourceImpl: typeof EventSource;
 
 export class BTCPClient {
   private config: Required<BTCPClientConfig>;
-  private ws: WebSocketLike | null = null;
+  private eventSource: EventSource | null = null;
   private eventHandlers: Map<keyof BTCPClientEvents, Set<Function>> = new Map();
   private pendingRequests: Map<string | number, {
     resolve: (value: JsonRpcResponse) => void;
@@ -64,6 +58,7 @@ export class BTCPClient {
   private isConnecting = false;
   private executor: ToolExecutor;
   private registeredTools: BTCPToolDefinition[] = [];
+  private abortController: AbortController | null = null;
 
   constructor(config: BTCPClientConfig = {}) {
     this.config = {
@@ -92,11 +87,11 @@ export class BTCPClient {
    * Check if client is connected
    */
   isConnected(): boolean {
-    return this.ws !== null && this.ws.readyState === 1; // WebSocket.OPEN
+    return this.eventSource !== null && this.eventSource.readyState === EventSource.OPEN;
   }
 
   /**
-   * Connect to the BTCP server
+   * Connect to the BTCP server using SSE
    */
   async connect(): Promise<void> {
     if (this.isConnected()) {
@@ -108,6 +103,10 @@ export class BTCPClient {
     }
 
     this.isConnecting = true;
+    this.abortController = new AbortController();
+
+    // Ensure EventSource is available
+    await this.ensureEventSource();
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -116,47 +115,44 @@ export class BTCPClient {
       }, this.config.connectionTimeout);
 
       try {
-        // Use dynamic import to support both Node.js and browser
-        this.createWebSocket().then((ws) => {
-          this.ws = ws;
+        const sseUrl = `${this.config.serverUrl}/events?sessionId=${encodeURIComponent(this.config.sessionId)}&clientType=browser&version=${this.config.version}`;
 
-          ws.onopen = () => {
-            clearTimeout(timeout);
-            this.isConnecting = false;
-            this.reconnectAttempts = 0;
-            this.log('Connected to BTCP server');
-            this.sendHello();
-            this.emit('connect');
-            resolve();
-          };
+        this.eventSource = new EventSourceImpl(sseUrl);
 
-          ws.onclose = (event) => {
-            clearTimeout(timeout);
-            this.isConnecting = false;
-            this.ws = null;
-            this.log(`Disconnected: ${event.code} - ${event.reason}`);
-            this.emit('disconnect', event.code, event.reason);
-            this.handleDisconnect();
-          };
-
-          ws.onerror = (event) => {
-            clearTimeout(timeout);
-            this.isConnecting = false;
-            const error = new BTCPConnectionError(
-              (event as { message?: string }).message || 'WebSocket error'
-            );
-            this.emit('error', error);
-            reject(error);
-          };
-
-          ws.onmessage = (event) => {
-            this.handleMessage(event.data);
-          };
-        }).catch((err) => {
+        this.eventSource.onopen = () => {
           clearTimeout(timeout);
           this.isConnecting = false;
-          reject(new BTCPConnectionError(`Failed to create WebSocket: ${err.message}`));
+          this.reconnectAttempts = 0;
+          this.log('Connected to BTCP server via SSE');
+          this.emit('connect');
+          resolve();
+        };
+
+        this.eventSource.onerror = (event) => {
+          clearTimeout(timeout);
+          if (this.isConnecting) {
+            this.isConnecting = false;
+            const error = new BTCPConnectionError('SSE connection error');
+            this.emit('error', error);
+            reject(error);
+          } else {
+            this.handleDisconnect();
+          }
+        };
+
+        this.eventSource.onmessage = (event) => {
+          this.handleMessage(event.data);
+        };
+
+        // Listen for specific event types
+        this.eventSource.addEventListener('request', (event) => {
+          this.handleMessage((event as MessageEvent).data);
         });
+
+        this.eventSource.addEventListener('response', (event) => {
+          this.handleMessage((event as MessageEvent).data);
+        });
+
       } catch (err) {
         clearTimeout(timeout);
         this.isConnecting = false;
@@ -166,27 +162,39 @@ export class BTCPClient {
   }
 
   /**
-   * Create WebSocket instance (supports both Node.js and browser)
+   * Ensure EventSource is available (polyfill for Node.js)
    */
-  private async createWebSocket(): Promise<WebSocketLike> {
-    // Check if we're in a browser environment
-    if (typeof globalThis.WebSocket !== 'undefined') {
-      return new globalThis.WebSocket(this.config.serverUrl) as unknown as WebSocketLike;
+  private async ensureEventSource(): Promise<void> {
+    if (typeof globalThis.EventSource !== 'undefined') {
+      EventSourceImpl = globalThis.EventSource;
+      return;
     }
 
-    // Node.js environment - use ws package
-    const { default: WebSocket } = await import('ws');
-    return new WebSocket(this.config.serverUrl) as unknown as WebSocketLike;
+    // Node.js environment - use eventsource package
+    try {
+      const { default: EventSource } = await import('eventsource');
+      EventSourceImpl = EventSource as unknown as typeof globalThis.EventSource;
+    } catch {
+      throw new BTCPConnectionError(
+        'EventSource not available. Install eventsource package: npm install eventsource'
+      );
+    }
   }
 
   /**
    * Disconnect from the server
    */
   disconnect(): void {
-    if (this.ws) {
-      this.config.autoReconnect = false; // Prevent auto-reconnect
-      this.ws.close(1000, 'Client disconnected');
-      this.ws = null;
+    this.config.autoReconnect = false;
+
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
     }
 
     // Clear pending requests
@@ -195,10 +203,12 @@ export class BTCPClient {
       pending.reject(new BTCPConnectionError('Client disconnected'));
     }
     this.pendingRequests.clear();
+
+    this.emit('disconnect', 1000, 'Client disconnected');
   }
 
   /**
-   * Send a JSON-RPC request and wait for response
+   * Send a JSON-RPC request via HTTP POST and wait for response
    */
   async sendRequest(
     method: string,
@@ -223,21 +233,54 @@ export class BTCPClient {
         timeout: timeoutId,
       });
 
-      this.send(request);
+      this.postMessage(request).catch((err) => {
+        this.pendingRequests.delete(request.id);
+        clearTimeout(timeoutId);
+        reject(err);
+      });
     });
   }
 
   /**
-   * Send a message without waiting for response
+   * Send a message via HTTP POST (no response expected)
    */
-  send(message: JsonRpcRequest | JsonRpcResponse | JsonRpcNotification): void {
-    if (!this.isConnected()) {
-      throw new BTCPConnectionError('Not connected to server');
+  async send(message: JsonRpcRequest | JsonRpcResponse | JsonRpcNotification): Promise<void> {
+    await this.postMessage(message);
+  }
+
+  /**
+   * Post a message to the server via HTTP
+   */
+  private async postMessage(
+    message: JsonRpcRequest | JsonRpcResponse | JsonRpcNotification
+  ): Promise<void> {
+    const url = `${this.config.serverUrl}/message`;
+    const body = serializeMessage(message);
+
+    this.log('Sending:', body);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-ID': this.config.sessionId,
+      },
+      body,
+      signal: this.abortController?.signal,
+    });
+
+    if (!response.ok) {
+      throw new BTCPConnectionError(`HTTP error: ${response.status}`);
     }
 
-    const data = serializeMessage(message);
-    this.log('Sending:', data);
-    this.ws!.send(data);
+    // Check if there's a response body
+    const text = await response.text();
+    if (text) {
+      const parsed = parseMessage(text);
+      if (parsed && isResponse(parsed)) {
+        this.handleResponseMessage(parsed);
+      }
+    }
   }
 
   /**
@@ -308,25 +351,7 @@ export class BTCPClient {
   }
 
   /**
-   * Send hello message to server
-   */
-  private sendHello(): void {
-    const request = createRequest('hello', {
-      clientType: 'browser',
-      version: this.config.version,
-      sessionId: this.config.sessionId,
-      capabilities: ['tools/execute', 'browser/automation'],
-    });
-    this.send(request);
-
-    // Re-register tools if we have any
-    if (this.registeredTools.length > 0) {
-      this.send(createRequest('tools/register', { tools: this.registeredTools }));
-    }
-  }
-
-  /**
-   * Handle incoming WebSocket message
+   * Handle incoming SSE message
    */
   private handleMessage(data: string): void {
     this.log('Received:', data);
@@ -339,12 +364,7 @@ export class BTCPClient {
 
     // Handle response to pending request
     if (isResponse(message)) {
-      const pending = this.pendingRequests.get(message.id);
-      if (pending) {
-        clearTimeout(pending.timeout);
-        this.pendingRequests.delete(message.id);
-        pending.resolve(message);
-      }
+      this.handleResponseMessage(message);
       return;
     }
 
@@ -359,6 +379,18 @@ export class BTCPClient {
   }
 
   /**
+   * Handle response message
+   */
+  private handleResponseMessage(response: JsonRpcResponse): void {
+    const pending = this.pendingRequests.get(response.id);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      this.pendingRequests.delete(response.id);
+      pending.resolve(response);
+    }
+  }
+
+  /**
    * Handle incoming request from server
    */
   private async handleRequest(request: JsonRpcRequest): Promise<void> {
@@ -366,7 +398,7 @@ export class BTCPClient {
 
     switch (request.method) {
       case 'tools/list':
-        this.handleToolsList(request as BTCPToolsListRequest);
+        await this.handleToolsList(request as BTCPToolsListRequest);
         break;
 
       case 'tools/call':
@@ -374,12 +406,12 @@ export class BTCPClient {
         break;
 
       case 'ping':
-        this.send(createResponse(request.id, { pong: true }));
+        await this.send(createResponse(request.id, { pong: true }));
         break;
 
       default:
         this.log(`Unknown method: ${request.method}`);
-        this.send(createResponse(request.id, undefined, {
+        await this.send(createResponse(request.id, undefined, {
           code: -32601,
           message: `Method not found: ${request.method}`,
         }));
@@ -389,11 +421,11 @@ export class BTCPClient {
   /**
    * Handle tools/list request
    */
-  private handleToolsList(request: BTCPToolsListRequest): void {
+  private async handleToolsList(request: BTCPToolsListRequest): Promise<void> {
     this.emit('toolsList', request);
 
     const tools = this.registeredTools;
-    this.send(createResponse(request.id, { tools }));
+    await this.send(createResponse(request.id, { tools }));
   }
 
   /**
@@ -406,10 +438,10 @@ export class BTCPClient {
 
     try {
       const result = await this.executor.execute(name, args);
-      this.send(createToolCallResponse(request.id, result));
+      await this.send(createToolCallResponse(request.id, result));
     } catch (err) {
       this.log(`Tool execution error for ${name}:`, err);
-      this.send(createToolCallErrorResponse(request.id, err as Error));
+      await this.send(createToolCallErrorResponse(request.id, err as Error));
     }
   }
 
@@ -417,6 +449,9 @@ export class BTCPClient {
    * Handle disconnect and auto-reconnect
    */
   private handleDisconnect(): void {
+    this.eventSource = null;
+    this.emit('disconnect', 0, 'Connection lost');
+
     if (!this.config.autoReconnect) {
       return;
     }

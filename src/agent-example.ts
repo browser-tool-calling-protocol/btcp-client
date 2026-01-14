@@ -1,8 +1,8 @@
 /**
- * BTCP Agent Example
+ * BTCP Agent Example (HTTP Streaming version)
  *
  * This example shows how an AI agent would connect to the BTCP server
- * and call tools provided by a browser client.
+ * and call tools provided by a browser client using HTTP streaming.
  *
  * Usage:
  *   1. Start the server: node dist/server.js
@@ -10,7 +10,6 @@
  *   3. Start this agent: node dist/agent-example.js <session-id>
  */
 
-import WebSocket from 'ws';
 import {
   createRequest,
   parseMessage,
@@ -20,11 +19,15 @@ import {
 } from './protocol.js';
 import type { JsonRpcResponse, BTCPToolDefinition } from './types.js';
 
-const SERVER_URL = process.env.BTCP_SERVER_URL || 'ws://localhost:8765';
+const SERVER_URL = process.env.BTCP_SERVER_URL || 'http://localhost:8765';
+
+// EventSource polyfill for Node.js
+let EventSourceImpl: typeof EventSource;
 
 class BTCPAgent {
-  private ws: WebSocket | null = null;
+  private eventSource: EventSource | null = null;
   private sessionId: string;
+  private currentSessionId: string;
   private tools: BTCPToolDefinition[] = [];
   private pendingRequests: Map<string | number, {
     resolve: (value: unknown) => void;
@@ -33,44 +36,65 @@ class BTCPAgent {
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
+    this.currentSessionId = `agent-${Date.now()}`;
   }
 
   async connect(): Promise<void> {
+    await this.ensureEventSource();
+
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(SERVER_URL);
+      const sseUrl = `${SERVER_URL}/events?sessionId=${encodeURIComponent(this.currentSessionId)}&clientType=agent`;
 
-      this.ws.on('open', () => {
-        console.log('Connected to BTCP server');
-        this.sendHello();
+      this.eventSource = new EventSourceImpl(sseUrl);
+
+      this.eventSource.onopen = () => {
+        console.log('Connected to BTCP server via SSE');
         resolve();
+      };
+
+      this.eventSource.onerror = (err) => {
+        if (this.eventSource?.readyState === EventSource.CONNECTING) {
+          // Still connecting, wait
+        } else {
+          reject(new Error('SSE connection error'));
+        }
+      };
+
+      this.eventSource.onmessage = (event) => {
+        this.handleMessage(event.data);
+      };
+
+      this.eventSource.addEventListener('response', (event) => {
+        this.handleMessage((event as MessageEvent).data);
       });
 
-      this.ws.on('message', (data) => {
-        this.handleMessage(data.toString());
-      });
-
-      this.ws.on('close', () => {
-        console.log('Disconnected from server');
-      });
-
-      this.ws.on('error', (err) => {
-        reject(err);
+      this.eventSource.addEventListener('request', (event) => {
+        this.handleMessage((event as MessageEvent).data);
       });
     });
   }
 
-  private sendHello(): void {
-    const request = createRequest('hello', {
-      clientType: 'agent',
-      version: '1.0.0',
-    });
-    this.send(request);
+  private async ensureEventSource(): Promise<void> {
+    if (typeof globalThis.EventSource !== 'undefined') {
+      EventSourceImpl = globalThis.EventSource;
+      return;
+    }
+
+    try {
+      const { default: EventSource } = await import('eventsource');
+      EventSourceImpl = EventSource as unknown as typeof globalThis.EventSource;
+    } catch {
+      throw new Error('EventSource not available. Install eventsource package: npm install eventsource');
+    }
   }
 
   async joinSession(): Promise<void> {
     const response = await this.sendRequest('session/join', {
       sessionId: this.sessionId,
     }) as { tools?: BTCPToolDefinition[] };
+
+    // Update currentSessionId to target session for future requests
+    this.currentSessionId = this.sessionId;
 
     if (response.tools) {
       this.tools = response.tools;
@@ -93,13 +117,6 @@ class BTCPAgent {
     return response;
   }
 
-  private send(message: unknown): void {
-    if (!this.ws) throw new Error('Not connected');
-    const data = serializeMessage(message as Parameters<typeof serializeMessage>[0]);
-    console.log('Sending:', data);
-    this.ws.send(data);
-  }
-
   private async sendRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const request = createRequest(method, params);
@@ -113,8 +130,48 @@ class BTCPAgent {
         }
       }, 30000);
 
-      this.send(request);
+      this.postMessage(request).catch((err) => {
+        this.pendingRequests.delete(request.id);
+        reject(err);
+      });
     });
+  }
+
+  private async postMessage(message: unknown): Promise<void> {
+    const url = `${SERVER_URL}/message`;
+    const body = serializeMessage(message as Parameters<typeof serializeMessage>[0]);
+
+    console.log('Sending:', body);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-ID': this.currentSessionId,
+      },
+      body,
+    });
+
+    if (!response.ok && response.status !== 202) {
+      throw new Error(`HTTP error: ${response.status}`);
+    }
+
+    // Check if there's a response body (for synchronous responses)
+    const text = await response.text();
+    if (text) {
+      const parsed = parseMessage(text);
+      if (parsed && isResponse(parsed)) {
+        const pending = this.pendingRequests.get(parsed.id);
+        if (pending) {
+          this.pendingRequests.delete(parsed.id);
+          if (parsed.error) {
+            pending.reject(new Error(parsed.error.message));
+          } else {
+            pending.resolve(parsed.result);
+          }
+        }
+      }
+    }
   }
 
   private handleMessage(data: string): void {
@@ -141,9 +198,9 @@ class BTCPAgent {
   }
 
   disconnect(): void {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
     }
   }
 }

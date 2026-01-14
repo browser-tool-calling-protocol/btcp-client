@@ -6,7 +6,7 @@ This is a proof-of-concept implementation of the [BTCP Specification](https://gi
 
 ## Features
 
-- WebSocket-based communication with BTCP servers
+- **HTTP Streaming** (SSE + POST) - More bandwidth efficient than WebSocket
 - JSON-RPC 2.0 protocol for message exchange
 - Tool registration and discovery
 - Tool execution with customizable handlers
@@ -21,12 +21,14 @@ This is a proof-of-concept implementation of the [BTCP Specification](https://gi
 │    AI Agent     │────▶│   BTCP Server   │◀────│  Browser Client │
 │  (Tool Caller)  │     │ (Message Broker)│     │  (Tool Provider)│
 └─────────────────┘     └─────────────────┘     └─────────────────┘
-                              │
-                              ▼
-                        ┌─────────────────┐
-                        │  Browser Agent  │
-                        │ (DOM Automation)│
-                        └─────────────────┘
+        │                       │                       │
+        │  POST /message        │  SSE /events          │  POST /message
+        │  SSE  /events         │                       │  SSE  /events
+        └───────────────────────┴───────────────────────┘
+
+Communication:
+  • Server → Client: SSE (Server-Sent Events) - efficient streaming
+  • Client → Server: HTTP POST - only when needed
 ```
 
 ## Installation
@@ -50,7 +52,7 @@ npm run server
 import { BTCPClient } from 'btcp-client';
 
 const client = new BTCPClient({
-  serverUrl: 'ws://localhost:8765',
+  serverUrl: 'http://localhost:8765',
   debug: true,
 });
 
@@ -98,19 +100,19 @@ The main client class for browser-side tool providers.
 
 ```typescript
 const client = new BTCPClient({
-  serverUrl: 'ws://localhost:8765',  // Server URL
-  sessionId: 'my-session',           // Optional session ID
-  debug: true,                        // Enable debug logging
-  autoReconnect: true,               // Auto-reconnect on disconnect
-  reconnectDelay: 1000,              // Reconnection delay (ms)
-  maxReconnectAttempts: 5,           // Max reconnection attempts
-  connectionTimeout: 10000,          // Connection timeout (ms)
+  serverUrl: 'http://localhost:8765', // Server URL (HTTP, not WS)
+  sessionId: 'my-session',            // Optional session ID
+  debug: true,                         // Enable debug logging
+  autoReconnect: true,                // Auto-reconnect on disconnect
+  reconnectDelay: 1000,               // Reconnection delay (ms)
+  maxReconnectAttempts: 5,            // Max reconnection attempts
+  connectionTimeout: 10000,           // Connection timeout (ms)
 });
 ```
 
 #### Methods
 
-- `connect(): Promise<void>` - Connect to the BTCP server
+- `connect(): Promise<void>` - Connect to the BTCP server via SSE
 - `disconnect(): void` - Disconnect from the server
 - `isConnected(): boolean` - Check connection status
 - `getSessionId(): string` - Get the session ID
@@ -203,25 +205,28 @@ npm run example
 npm run agent -- <session-id>
 ```
 
+## Server Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/events` | GET | SSE stream for receiving messages |
+| `/message` | POST | Send JSON-RPC messages |
+| `/health` | GET | Health check |
+
+### Query Parameters for `/events`
+
+- `sessionId` - Session identifier (required)
+- `clientType` - `browser` or `agent`
+- `version` - Protocol version
+
+### Headers for `/message`
+
+- `Content-Type: application/json`
+- `X-Session-ID: <session-id>`
+
 ## Protocol Messages
 
-### Hello (Browser Client → Server)
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "1",
-  "method": "hello",
-  "params": {
-    "clientType": "browser",
-    "version": "1.0.0",
-    "sessionId": "my-session",
-    "capabilities": ["tools/execute"]
-  }
-}
-```
-
-### Tools Register (Browser Client → Server)
+### Tools Register (Browser Client → Server via POST)
 
 ```json
 {
@@ -245,7 +250,7 @@ npm run agent -- <session-id>
 }
 ```
 
-### Tool Call (Server → Browser Client)
+### Tool Call (Server → Browser Client via SSE)
 
 ```json
 {
@@ -259,7 +264,7 @@ npm run agent -- <session-id>
 }
 ```
 
-### Tool Response (Browser Client → Server)
+### Tool Response (Browser Client → Server via POST)
 
 ```json
 {
@@ -286,12 +291,23 @@ import { BrowserAgent } from 'btcp-browser-agent';
 const agent = new BrowserAgent();
 await agent.launch();
 
-const client = new BTCPClient({ debug: true });
+const client = new BTCPClient({
+  serverUrl: 'http://localhost:8765',
+  debug: true
+});
 client.getExecutor().setBrowserAgent(agent);
 
 await client.connect();
 await client.registerTools(client.getExecutor().getToolDefinitions());
 ```
+
+## Why HTTP Streaming over WebSocket?
+
+1. **Lower bandwidth** - SSE is unidirectional, no frame overhead
+2. **Better proxy/CDN support** - HTTP works everywhere
+3. **Simpler protocol** - Standard HTTP semantics
+4. **Auto-reconnect built-in** - EventSource handles reconnection
+5. **No handshake overhead** - Direct HTTP connection
 
 ## License
 

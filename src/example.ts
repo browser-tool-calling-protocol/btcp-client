@@ -13,7 +13,7 @@ import { BTCPClient, BTCPToolDefinition, createTextContent } from './index.js';
 async function main() {
   // Create client with debug logging
   const client = new BTCPClient({
-    serverUrl: process.env.BTCP_SERVER_URL || 'ws://localhost:8765',
+    serverUrl: process.env.BTCP_SERVER_URL || 'http://localhost:8765',
     debug: true,
     autoReconnect: true,
   });

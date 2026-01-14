@@ -1,8 +1,8 @@
 /**
- * Simple BTCP Server for Testing
+ * Simple BTCP Server for Testing (HTTP Streaming version)
  *
- * This is a minimal BTCP server implementation for testing the client.
- * It acts as a message broker between browser clients and AI agents.
+ * Uses SSE for server→client, HTTP POST for client→server
+ * More bandwidth efficient than WebSocket.
  *
  * Usage:
  *   npx ts-node src/server.ts
@@ -10,7 +10,8 @@
  *   node dist/server.js
  */
 
-import { WebSocketServer, WebSocket } from 'ws';
+import http from 'http';
+import { URL } from 'url';
 import {
   parseMessage,
   serializeMessage,
@@ -22,138 +23,106 @@ import {
 } from './protocol.js';
 import type { JsonRpcRequest, JsonRpcResponse, BTCPToolDefinition } from './types.js';
 
-interface Session {
-  id: string;
-  browserClient: WebSocket | null;
-  agentClients: Set<WebSocket>;
-  tools: BTCPToolDefinition[];
-  createdAt: Date;
+interface SSEClient {
+  res: http.ServerResponse;
+  sessionId: string;
+  clientType: 'browser' | 'agent';
 }
 
-interface ClientInfo {
-  ws: WebSocket;
-  type: 'browser' | 'agent' | 'unknown';
-  sessionId: string | null;
+interface Session {
+  id: string;
+  browserClient: SSEClient | null;
+  agentClients: Set<SSEClient>;
+  tools: BTCPToolDefinition[];
+  createdAt: Date;
 }
 
 const PORT = parseInt(process.env.BTCP_PORT || '8765', 10);
 
 class BTCPServer {
-  private wss: WebSocketServer;
+  private server: http.Server;
   private sessions: Map<string, Session> = new Map();
-  private clients: Map<WebSocket, ClientInfo> = new Map();
+  private clients: Map<http.ServerResponse, SSEClient> = new Map();
   private pendingResponses: Map<string | number, {
-    agentWs: WebSocket;
+    agentClient: SSEClient;
     originalId: string | number;
   }> = new Map();
 
   constructor(port: number) {
-    this.wss = new WebSocketServer({ port });
-    this.setupServer();
-    console.log(`BTCP Server listening on ws://localhost:${port}`);
-  }
-
-  private setupServer(): void {
-    this.wss.on('connection', (ws) => {
-      console.log('New connection');
-
-      this.clients.set(ws, {
-        ws,
-        type: 'unknown',
-        sessionId: null,
-      });
-
-      ws.on('message', (data) => {
-        this.handleMessage(ws, data.toString());
-      });
-
-      ws.on('close', () => {
-        this.handleDisconnect(ws);
-      });
-
-      ws.on('error', (err) => {
-        console.error('WebSocket error:', err.message);
-      });
+    this.server = http.createServer((req, res) => this.handleRequest(req, res));
+    this.server.listen(port, () => {
+      console.log(`BTCP Server listening on http://localhost:${port}`);
+      console.log('Endpoints:');
+      console.log(`  GET  /events?sessionId=...&clientType=browser|agent  - SSE stream`);
+      console.log(`  POST /message                                        - Send messages`);
     });
   }
 
-  private handleMessage(ws: WebSocket, data: string): void {
-    console.log('Received:', data);
+  private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+    // CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Session-ID');
 
-    const message = parseMessage(data);
-    if (!message) {
-      console.log('Invalid message');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
       return;
     }
 
-    const client = this.clients.get(ws)!;
+    const url = new URL(req.url || '/', `http://localhost:${PORT}`);
 
-    // Handle responses from browser client
-    if (isResponse(message)) {
-      this.handleResponse(ws, message);
-      return;
-    }
-
-    if (!isRequest(message)) {
-      return;
-    }
-
-    const request = message as JsonRpcRequest;
-
-    switch (request.method) {
-      case 'hello':
-        this.handleHello(ws, request);
-        break;
-
-      case 'tools/register':
-        this.handleToolsRegister(ws, request);
-        break;
-
-      case 'tools/list':
-        this.handleToolsList(ws, request);
-        break;
-
-      case 'tools/call':
-        this.handleToolsCall(ws, request);
-        break;
-
-      case 'session/join':
-        this.handleSessionJoin(ws, request);
-        break;
-
-      case 'ping':
-        ws.send(serializeMessage(createResponse(request.id, { pong: true })));
-        break;
-
-      default:
-        ws.send(serializeMessage(createErrorResponse(
-          request.id,
-          -32601,
-          `Method not found: ${request.method}`
-        )));
+    if (req.method === 'GET' && url.pathname === '/events') {
+      this.handleSSE(req, res, url);
+    } else if (req.method === 'POST' && url.pathname === '/message') {
+      this.handleMessage(req, res);
+    } else if (req.method === 'GET' && url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', sessions: this.sessions.size }));
+    } else {
+      res.writeHead(404);
+      res.end('Not Found');
     }
   }
 
-  private handleHello(ws: WebSocket, request: JsonRpcRequest): void {
-    const params = request.params as {
-      clientType: 'browser' | 'agent';
-      sessionId?: string;
-      version?: string;
+  /**
+   * Handle SSE connection
+   */
+  private handleSSE(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
+    const sessionId = url.searchParams.get('sessionId');
+    const clientType = url.searchParams.get('clientType') as 'browser' | 'agent';
+
+    if (!sessionId) {
+      res.writeHead(400);
+      res.end('Missing sessionId');
+      return;
+    }
+
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+
+    // Send initial comment to establish connection
+    res.write(': connected\n\n');
+
+    const client: SSEClient = {
+      res,
+      sessionId,
+      clientType: clientType || 'browser',
     };
 
-    const client = this.clients.get(ws)!;
-    client.type = params.clientType;
+    this.clients.set(res, client);
 
-    if (params.clientType === 'browser') {
-      // Browser client creates or joins a session
-      const sessionId = params.sessionId || `session-${Date.now()}`;
-      client.sessionId = sessionId;
-
+    // Handle session
+    if (clientType === 'browser') {
       let session = this.sessions.get(sessionId);
       if (!session) {
         session = {
           id: sessionId,
-          browserClient: ws,
+          browserClient: client,
           agentClients: new Set(),
           tools: [],
           createdAt: new Date(),
@@ -161,61 +130,199 @@ class BTCPServer {
         this.sessions.set(sessionId, session);
         console.log(`Created session: ${sessionId}`);
       } else {
-        session.browserClient = ws;
+        session.browserClient = client;
         console.log(`Browser rejoined session: ${sessionId}`);
       }
 
-      ws.send(serializeMessage(createResponse(request.id, {
-        sessionId,
-        message: 'Welcome to BTCP server',
-      })));
+      // Send welcome message
+      this.sendSSE(client, {
+        jsonrpc: '2.0',
+        id: 'welcome',
+        result: { sessionId, message: 'Connected to BTCP server' },
+      });
     } else {
-      // Agent client
-      ws.send(serializeMessage(createResponse(request.id, {
-        message: 'Welcome to BTCP server (agent)',
-        availableSessions: Array.from(this.sessions.keys()),
-      })));
+      // Agent client - need to join session via message
+      this.sendSSE(client, {
+        jsonrpc: '2.0',
+        id: 'welcome',
+        result: {
+          message: 'Connected to BTCP server (agent)',
+          availableSessions: Array.from(this.sessions.keys()),
+        },
+      });
+    }
+
+    // Handle disconnect
+    req.on('close', () => {
+      this.handleDisconnect(res);
+    });
+
+    // Keep-alive ping every 30 seconds
+    const keepAlive = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(': ping\n\n');
+      } else {
+        clearInterval(keepAlive);
+      }
+    }, 30000);
+  }
+
+  /**
+   * Send SSE message to client
+   */
+  private sendSSE(client: SSEClient, data: unknown, event = 'message'): void {
+    if (!client.res.writableEnded) {
+      const json = typeof data === 'string' ? data : JSON.stringify(data);
+      client.res.write(`event: ${event}\n`);
+      client.res.write(`data: ${json}\n\n`);
     }
   }
 
-  private handleSessionJoin(ws: WebSocket, request: JsonRpcRequest): void {
-    const params = request.params as { sessionId: string };
-    const client = this.clients.get(ws)!;
+  /**
+   * Handle POST message
+   */
+  private handleMessage(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const sessionId = req.headers['x-session-id'] as string;
 
-    const session = this.sessions.get(params.sessionId);
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+    });
+
+    req.on('end', () => {
+      console.log('Received message:', body);
+
+      const message = parseMessage(body);
+      if (!message) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON-RPC message' }));
+        return;
+      }
+
+      // Handle response from browser client
+      if (isResponse(message)) {
+        this.handleResponseFromBrowser(message as JsonRpcResponse, sessionId);
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+
+      if (!isRequest(message)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Expected request or response' }));
+        return;
+      }
+
+      const request = message as JsonRpcRequest;
+
+      // Handle different methods
+      switch (request.method) {
+        case 'tools/register':
+          this.handleToolsRegister(request, sessionId, res);
+          break;
+
+        case 'tools/list':
+          this.handleToolsList(request, sessionId, res);
+          break;
+
+        case 'tools/call':
+          this.handleToolsCall(request, sessionId, res);
+          break;
+
+        case 'session/join':
+          this.handleSessionJoin(request, sessionId, res);
+          break;
+
+        case 'ping':
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(createResponse(request.id, { pong: true })));
+          break;
+
+        default:
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(createErrorResponse(
+            request.id,
+            -32601,
+            `Method not found: ${request.method}`
+          )));
+      }
+    });
+  }
+
+  private handleResponseFromBrowser(response: JsonRpcResponse, sessionId: string): void {
+    const pending = this.pendingResponses.get(response.id);
+    if (pending) {
+      this.pendingResponses.delete(response.id);
+
+      // Forward response back to agent with original ID
+      const agentResponse = { ...response, id: pending.originalId };
+      this.sendSSE(pending.agentClient, agentResponse, 'response');
+      console.log('Forwarded response to agent');
+    }
+  }
+
+  private handleToolsRegister(
+    request: JsonRpcRequest,
+    sessionId: string,
+    res: http.ServerResponse
+  ): void {
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      ws.send(serializeMessage(createErrorResponse(
-        request.id,
-        -32602,
-        `Session not found: ${params.sessionId}`
-      )));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(createErrorResponse(request.id, -32600, 'Session not found')));
       return;
     }
 
-    client.sessionId = params.sessionId;
-    session.agentClients.add(ws);
-    console.log(`Agent joined session: ${params.sessionId}`);
+    const params = request.params as { tools: BTCPToolDefinition[] };
+    session.tools = params.tools;
+    console.log(`Registered ${params.tools.length} tools in session ${sessionId}`);
 
-    ws.send(serializeMessage(createResponse(request.id, {
-      sessionId: params.sessionId,
-      tools: session.tools,
-    })));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(createResponse(request.id, { registered: params.tools.length })));
+
+    // Notify agents about new tools
+    for (const agentClient of session.agentClients) {
+      this.sendSSE(agentClient, createRequest('tools/updated', { tools: params.tools }));
+    }
   }
 
-  private handleToolsRegister(ws: WebSocket, request: JsonRpcRequest): void {
-    const client = this.clients.get(ws)!;
-    if (!client.sessionId) {
-      ws.send(serializeMessage(createErrorResponse(
+  private handleToolsList(
+    request: JsonRpcRequest,
+    sessionId: string,
+    res: http.ServerResponse
+  ): void {
+    // Find session for this agent
+    let session: Session | undefined;
+
+    // Check if sessionId header matches a session
+    if (sessionId) {
+      session = this.sessions.get(sessionId);
+    }
+
+    if (!session) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(createErrorResponse(
         request.id,
         -32600,
-        'Not in a session'
+        'Session not found. Join a session first.'
       )));
       return;
     }
 
-    const session = this.sessions.get(client.sessionId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(createResponse(request.id, { tools: session.tools })));
+  }
+
+  private handleToolsCall(
+    request: JsonRpcRequest,
+    sessionId: string,
+    res: http.ServerResponse
+  ): void {
+    // Find the session
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      ws.send(serializeMessage(createErrorResponse(
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(createErrorResponse(
         request.id,
         -32600,
         'Session not found'
@@ -223,80 +330,9 @@ class BTCPServer {
       return;
     }
 
-    const params = request.params as { tools: BTCPToolDefinition[] };
-    session.tools = params.tools;
-    console.log(`Registered ${params.tools.length} tools in session ${client.sessionId}`);
-
-    ws.send(serializeMessage(createResponse(request.id, {
-      registered: params.tools.length,
-    })));
-
-    // Notify agents about new tools
-    for (const agentWs of session.agentClients) {
-      agentWs.send(serializeMessage(createRequest('tools/updated', {
-        tools: params.tools,
-      })));
-    }
-  }
-
-  private handleToolsList(ws: WebSocket, request: JsonRpcRequest): void {
-    const client = this.clients.get(ws)!;
-
-    if (client.type === 'agent') {
-      // Agent requesting tools from browser
-      if (!client.sessionId) {
-        ws.send(serializeMessage(createErrorResponse(
-          request.id,
-          -32600,
-          'Not in a session. Use session/join first.'
-        )));
-        return;
-      }
-
-      const session = this.sessions.get(client.sessionId);
-      if (!session || !session.browserClient) {
-        ws.send(serializeMessage(createErrorResponse(
-          request.id,
-          -32600,
-          'Browser client not connected'
-        )));
-        return;
-      }
-
-      // Return cached tools
-      ws.send(serializeMessage(createResponse(request.id, {
-        tools: session.tools,
-      })));
-    } else {
-      // Browser responding to tools list
-      // This is handled in the request handler
-    }
-  }
-
-  private handleToolsCall(ws: WebSocket, request: JsonRpcRequest): void {
-    const client = this.clients.get(ws)!;
-
-    if (client.type !== 'agent') {
-      ws.send(serializeMessage(createErrorResponse(
-        request.id,
-        -32600,
-        'Only agents can call tools'
-      )));
-      return;
-    }
-
-    if (!client.sessionId) {
-      ws.send(serializeMessage(createErrorResponse(
-        request.id,
-        -32600,
-        'Not in a session. Use session/join first.'
-      )));
-      return;
-    }
-
-    const session = this.sessions.get(client.sessionId);
-    if (!session || !session.browserClient) {
-      ws.send(serializeMessage(createErrorResponse(
+    if (!session.browserClient) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(createErrorResponse(
         request.id,
         -32600,
         'Browser client not connected'
@@ -304,64 +340,106 @@ class BTCPServer {
       return;
     }
 
-    // Forward the request to the browser client
+    // Find the agent client
+    const agentClient = Array.from(session.agentClients).find(
+      (c) => c.sessionId === sessionId
+    );
+
+    if (!agentClient) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(createErrorResponse(
+        request.id,
+        -32600,
+        'Agent not in session'
+      )));
+      return;
+    }
+
+    // Forward the request to the browser client via SSE
     const forwardedRequest = createRequest('tools/call', request.params as Record<string, unknown>);
 
     // Store mapping to route response back
     this.pendingResponses.set(forwardedRequest.id, {
-      agentWs: ws,
+      agentClient,
       originalId: request.id,
     });
 
-    session.browserClient.send(serializeMessage(forwardedRequest));
+    this.sendSSE(session.browserClient, forwardedRequest, 'request');
     console.log(`Forwarded tool call to browser: ${(request.params as { name: string }).name}`);
+
+    // Respond immediately - actual result comes via SSE
+    res.writeHead(202);
+    res.end();
   }
 
-  private handleResponse(ws: WebSocket, response: JsonRpcResponse): void {
-    // Check if this is a response to a forwarded request
-    const pending = this.pendingResponses.get(response.id);
-    if (pending) {
-      this.pendingResponses.delete(response.id);
+  private handleSessionJoin(
+    request: JsonRpcRequest,
+    currentSessionId: string,
+    res: http.ServerResponse
+  ): void {
+    const params = request.params as { sessionId: string };
+    const targetSessionId = params.sessionId;
 
-      // Forward response back to agent with original ID
-      const agentResponse = { ...response, id: pending.originalId };
-      pending.agentWs.send(serializeMessage(agentResponse));
-      console.log('Forwarded response to agent');
+    const session = this.sessions.get(targetSessionId);
+    if (!session) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(createErrorResponse(
+        request.id,
+        -32602,
+        `Session not found: ${targetSessionId}`
+      )));
+      return;
     }
+
+    // Find the agent's SSE client by their current sessionId
+    const agentClient = Array.from(this.clients.values()).find(
+      (c) => c.sessionId === currentSessionId && c.clientType === 'agent'
+    );
+
+    if (agentClient) {
+      // Update agent's session and add to session's agent list
+      agentClient.sessionId = targetSessionId;
+      session.agentClients.add(agentClient);
+      console.log(`Agent joined session: ${targetSessionId}`);
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(createResponse(request.id, {
+      sessionId: targetSessionId,
+      tools: session.tools,
+    })));
   }
 
-  private handleDisconnect(ws: WebSocket): void {
-    const client = this.clients.get(ws);
+  private handleDisconnect(clientRes: http.ServerResponse): void {
+    const client = this.clients.get(clientRes);
     if (!client) return;
 
-    console.log(`Client disconnected: ${client.type}`);
+    console.log(`Client disconnected: ${client.clientType}`);
 
-    if (client.sessionId) {
-      const session = this.sessions.get(client.sessionId);
-      if (session) {
-        if (client.type === 'browser') {
-          session.browserClient = null;
-          // Notify agents
-          for (const agentWs of session.agentClients) {
-            agentWs.send(serializeMessage(createRequest('session/browserDisconnected', {})));
-          }
-        } else {
-          session.agentClients.delete(ws);
+    const session = this.sessions.get(client.sessionId);
+    if (session) {
+      if (client.clientType === 'browser') {
+        session.browserClient = null;
+        // Notify agents
+        for (const agentClient of session.agentClients) {
+          this.sendSSE(agentClient, createRequest('session/browserDisconnected', {}));
         }
+      } else {
+        session.agentClients.delete(client);
+      }
 
-        // Clean up empty sessions
-        if (!session.browserClient && session.agentClients.size === 0) {
-          this.sessions.delete(client.sessionId);
-          console.log(`Removed empty session: ${client.sessionId}`);
-        }
+      // Clean up empty sessions
+      if (!session.browserClient && session.agentClients.size === 0) {
+        this.sessions.delete(client.sessionId);
+        console.log(`Removed empty session: ${client.sessionId}`);
       }
     }
 
-    this.clients.delete(ws);
+    this.clients.delete(clientRes);
   }
 
   close(): void {
-    this.wss.close();
+    this.server.close();
   }
 }
 
