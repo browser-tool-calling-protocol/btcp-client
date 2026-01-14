@@ -1,0 +1,46 @@
+{
+  "name": "btcp-client",
+  "version": "0.1.0",
+  "description": "Browser Tool Calling Protocol (BTCP) client for connecting browser extensions to AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "server": "node dist/server.js",
+    "example": "node dist/example.js",
+    "agent": "node dist/agent-example.js"
+  },
+  "keywords": [
+    "btcp",
+    "browser",
+    "tool-calling",
+    "ai-agent",
+    "browser-automation"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.10"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "peerDependencies": {
+    "btcp-browser-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "btcp-browser-agent": {
+      "optional": true
+    }
+  }
+}
