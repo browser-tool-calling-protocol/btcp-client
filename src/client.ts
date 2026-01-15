@@ -1,6 +1,12 @@
 /**
- * BTCP Client - HTTP Streaming client for Browser Tool Calling Protocol
- * Uses SSE for server→client, POST for client→server (more bandwidth efficient than WebSocket)
+ * BTCP Client - Tool provider for Browser Tool Calling Protocol
+ *
+ * BTCPClient is the tool PROVIDER (browser side):
+ * - Registers tool handlers
+ * - Executes tools when called
+ * - Connects to server in remote mode
+ *
+ * For the tool CONSUMER (agent side), use ToolConsumer.
  */
 
 import {
@@ -15,6 +21,7 @@ import {
   JsonRpcResponse,
   JsonRpcNotification,
   BTCPConnectionError,
+  ToolHandler,
 } from './types.js';
 
 import {

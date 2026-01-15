@@ -1,55 +1,50 @@
 /**
- * BTCP Client - Browser Tool Calling Protocol Client
+ * BTCP Client - Browser Tool Calling Protocol
  *
- * A TypeScript/JavaScript client for connecting browser extensions to AI agents
- * via the Browser Tool Calling Protocol (BTCP).
+ * Two main classes:
+ * - BTCPClient: Tool PROVIDER (browser side) - registers and executes tools
+ * - ToolConsumer: Tool CONSUMER (agent side) - lists and calls tools
  *
- * ## Local Mode (default - Chrome Extension)
+ * ## Local Mode (same process - Chrome Extension)
  *
  * @example
  * ```typescript
- * import { BTCPClient } from 'btcp-client';
+ * import { BTCPClient, ToolConsumer } from 'btcp-client';
  *
- * // Create client (local mode by default)
+ * // Provider: register tools
  * const client = new BTCPClient();
- *
- * // Register tool handlers
- * client.registerHandler('searchPage', async (args) => {
- *   const results = document.querySelectorAll(args.selector as string);
- *   return `Found ${results.length} elements`;
+ * client.registerHandler('click', async (args) => {
+ *   document.querySelector(args.selector as string)?.click();
+ *   return 'clicked';
  * });
  *
- * // Execute tools directly (agent calls this via its own interface)
- * const result = await client.execute('searchPage', { selector: '.button' });
- * console.log(result.content); // [{ type: 'text', text: 'Found 5 elements' }]
+ * // Consumer: call tools (agent uses this)
+ * const consumer = new ToolConsumer({ client });
+ * const tools = await consumer.listTools();
+ * const result = await consumer.callTool('click', { selector: '.btn' });
  * ```
  *
- * ## Remote Server Mode (separate processes)
+ * ## Remote Mode (separate processes)
  *
  * @example
  * ```typescript
- * import { BTCPClient } from 'btcp-client';
- *
- * const client = new BTCPClient({
- *   serverUrl: 'http://localhost:8765',
- *   debug: true,
- * });
- *
- * // Register tool handler
- * client.registerHandler('myTool', async (args) => {
- *   return `Result: ${args.value}`;
- * });
- *
- * // Connect to server (required for remote mode)
+ * // Browser side (tool provider)
+ * const client = new BTCPClient({ serverUrl: 'http://localhost:8765' });
+ * client.registerHandler('click', async (args) => { ... });
  * await client.connect();
  *
- * // Register tools with server
- * await client.registerTools([...]);
+ * // Agent side (tool consumer) - separate process
+ * const consumer = new ToolConsumer({ serverUrl: 'http://localhost:8765' });
+ * const tools = await consumer.listTools();
+ * const result = await consumer.callTool('click', { selector: '.btn' });
  * ```
  */
 
-// Main client (local by default, remote with serverUrl)
+// Tool provider (browser side)
 export { BTCPClient } from './client.js';
+
+// Tool consumer (agent side)
+export { ToolConsumer, type ToolConsumerConfig } from './consumer.js';
 
 // Tool executor
 export { ToolExecutor } from './executor.js';

@@ -1,20 +1,21 @@
 /**
- * Chrome Extension Example - BTCP Client Usage
+ * Chrome Extension Example - BTCP Client + ToolConsumer Usage
  *
- * Shows how to use BTCP client in a Chrome extension (local mode).
- * The agent integrates via its own interface (MCP, programmatic, etc.).
+ * Shows the separation between:
+ * - BTCPClient: Tool provider (registers handlers)
+ * - ToolConsumer: Tool consumer (agent calls tools)
  */
 
-import { BTCPClient } from './index.js';
+import { BTCPClient, ToolConsumer } from './index.js';
 
 /**
- * Example: Set up BTCP tools in a Chrome extension
+ * Example: Set up BTCP in a Chrome extension
  */
-export function setupBrowserTools() {
-  // Create client (local mode by default)
+export function setup() {
+  // === PROVIDER SIDE (browser/content script) ===
   const client = new BTCPClient({ debug: true });
 
-  // Register DOM tools
+  // Register tool handlers
   client.registerHandler('click', async (args) => {
     const el = document.querySelector(args.selector as string) as HTMLElement;
     if (!el) throw new Error(`Element not found: ${args.selector}`);
@@ -30,29 +31,23 @@ export function setupBrowserTools() {
     return `Filled: ${args.selector}`;
   });
 
-  client.registerHandler('getText', async (args) => {
-    const el = document.querySelector(args.selector as string);
-    if (!el) throw new Error(`Element not found: ${args.selector}`);
-    return el.textContent || '';
-  });
+  client.registerHandler('getPageInfo', async () => ({
+    url: window.location.href,
+    title: document.title,
+  }));
 
-  client.registerHandler('getPageInfo', async () => {
-    return {
-      url: window.location.href,
-      title: document.title,
-    };
-  });
+  // === CONSUMER SIDE (agent) ===
+  const consumer = new ToolConsumer({ client });
 
-  return client;
+  return { client, consumer };
 }
 
 /**
  * Example usage:
  *
- * // In content script
- * const client = setupBrowserTools();
+ * const { client, consumer } = setup();
  *
- * // Agent calls tools via its own interface (MCP, etc.)
- * // which internally calls:
- * const result = await client.execute('click', { selector: '.btn' });
+ * // Agent uses consumer to interact with tools
+ * const tools = await consumer.listTools();
+ * const result = await consumer.callTool('click', { selector: '.btn' });
  */
