@@ -36,31 +36,23 @@
  * ]);
  * ```
  *
- * ## Local Bridge Mode (same context - Chrome Extension)
+ * ## Local Mode (same context - Chrome Extension)
  *
  * @example
  * ```typescript
- * import { BTCPLocalBridge } from 'btcp-client';
+ * import { createLocalClient } from 'btcp-client';
  *
- * // Create a bridge for in-process communication
- * const bridge = new BTCPLocalBridge({ debug: true });
+ * // Create local client
+ * const client = createLocalClient();
  *
- * // Client side: Register tools
- * const client = bridge.createClient();
- * client.getExecutor().registerHandler('searchPage', async (args) => {
+ * // Register tool handlers
+ * client.registerHandler('searchPage', async (args) => {
  *   const results = document.querySelectorAll(args.selector as string);
  *   return `Found ${results.length} elements`;
  * });
- * client.registerTools([{
- *   name: 'searchPage',
- *   description: 'Search for elements on the page',
- *   inputSchema: { type: 'object', properties: { selector: { type: 'string' } } }
- * }]);
  *
- * // Agent side: Call tools directly
- * const agent = bridge.createAgentAdapter();
- * const tools = await agent.listTools();
- * const result = await agent.callTool('searchPage', { selector: '.button' });
+ * // Execute tools directly (agent calls this via its own interface)
+ * const result = await client.execute('searchPage', { selector: '.button' });
  * console.log(result.content); // [{ type: 'text', text: 'Found 5 elements' }]
  * ```
  */
@@ -68,8 +60,8 @@
 // Main client (server-based)
 export { BTCPClient } from './client.js';
 
-// Local bridge (in-process, no server)
-export { BTCPLocalBridge, BTCPLocalClient, BTCPAgentAdapter } from './local-bridge.js';
+// Local client (in-process, no server)
+export { createLocalClient, type LocalClient } from './local-bridge.js';
 
 // Tool executor
 export { ToolExecutor } from './executor.js';
@@ -116,12 +108,8 @@ export type {
   BTCPClientEventHandler,
   ToolHandler,
   ToolExecutorConfig,
-  // Local bridge types
-  BTCPLocalBridgeConfig,
+  // Local client types
   BTCPToolCallResult,
-  BTCPLocalBridgeEvents,
-  IBTCPLocalClient,
-  IBTCPAgentAdapter,
 } from './types.js';
 
 // Errors
