@@ -248,3 +248,65 @@ export class BTCPToolNotFoundError extends BTCPError {
     this.name = 'BTCPToolNotFoundError';
   }
 }
+
+// ============================================================================
+// Local Bridge Types (for in-process agent-client communication)
+// ============================================================================
+
+/**
+ * Configuration for the local bridge
+ */
+export interface BTCPLocalBridgeConfig {
+  /** Enable debug logging */
+  debug?: boolean;
+}
+
+/**
+ * Tool call result from the agent adapter
+ */
+export interface BTCPToolCallResult {
+  /** Content returned by the tool */
+  content: BTCPContent[];
+  /** Whether the result is an error */
+  isError?: boolean;
+}
+
+/**
+ * Events emitted by the local bridge
+ */
+export interface BTCPLocalBridgeEvents {
+  /** Tools have been registered or updated */
+  toolsUpdated: (tools: BTCPToolDefinition[]) => void;
+  /** A tool was called */
+  toolCall: (name: string, args: Record<string, unknown>) => void;
+  /** Error occurred */
+  error: (error: Error) => void;
+}
+
+/**
+ * Interface for the client side of the local bridge
+ */
+export interface IBTCPLocalClient {
+  /** Register tools with the bridge */
+  registerTools(tools: BTCPToolDefinition[]): void;
+  /** Get registered tools */
+  getRegisteredTools(): BTCPToolDefinition[];
+  /** Get the tool executor */
+  getExecutor(): unknown;
+  /** Check if connected to bridge */
+  isConnected(): boolean;
+}
+
+/**
+ * Interface for the agent side of the local bridge
+ */
+export interface IBTCPAgentAdapter {
+  /** List available tools */
+  listTools(): Promise<BTCPToolDefinition[]>;
+  /** Call a tool by name */
+  callTool(name: string, args: Record<string, unknown>): Promise<BTCPToolCallResult>;
+  /** Subscribe to tools updated events */
+  onToolsUpdated(callback: (tools: BTCPToolDefinition[]) => void): () => void;
+  /** Check if connected to client */
+  isConnected(): boolean;
+}
