@@ -4,46 +4,14 @@
  * A TypeScript/JavaScript client for connecting browser extensions to AI agents
  * via the Browser Tool Calling Protocol (BTCP).
  *
- * ## Remote Server Mode (separate processes)
+ * ## Local Mode (default - Chrome Extension)
  *
  * @example
  * ```typescript
  * import { BTCPClient } from 'btcp-client';
  *
- * const client = new BTCPClient({
- *   serverUrl: 'http://localhost:8765',
- *   debug: true,
- * });
- *
- * // Register custom tool handler
- * client.getExecutor().registerHandler('myTool', async (args) => {
- *   return `Result: ${args.value}`;
- * });
- *
- * // Connect to server
- * await client.connect();
- *
- * // Register tools with server
- * await client.registerTools([
- *   {
- *     name: 'myTool',
- *     description: 'A custom tool',
- *     inputSchema: {
- *       type: 'object',
- *       properties: { value: { type: 'string' } },
- *     },
- *   },
- * ]);
- * ```
- *
- * ## Local Mode (same context - Chrome Extension)
- *
- * @example
- * ```typescript
- * import { createLocalClient } from 'btcp-client';
- *
- * // Create local client
- * const client = createLocalClient();
+ * // Create client (local mode by default)
+ * const client = new BTCPClient();
  *
  * // Register tool handlers
  * client.registerHandler('searchPage', async (args) => {
@@ -55,13 +23,33 @@
  * const result = await client.execute('searchPage', { selector: '.button' });
  * console.log(result.content); // [{ type: 'text', text: 'Found 5 elements' }]
  * ```
+ *
+ * ## Remote Server Mode (separate processes)
+ *
+ * @example
+ * ```typescript
+ * import { BTCPClient } from 'btcp-client';
+ *
+ * const client = new BTCPClient({
+ *   serverUrl: 'http://localhost:8765',
+ *   debug: true,
+ * });
+ *
+ * // Register tool handler
+ * client.registerHandler('myTool', async (args) => {
+ *   return `Result: ${args.value}`;
+ * });
+ *
+ * // Connect to server (required for remote mode)
+ * await client.connect();
+ *
+ * // Register tools with server
+ * await client.registerTools([...]);
+ * ```
  */
 
-// Main client (server-based)
+// Main client (local by default, remote with serverUrl)
 export { BTCPClient } from './client.js';
-
-// Local client (in-process, no server)
-export { createLocalClient, type LocalClient } from './local-bridge.js';
 
 // Tool executor
 export { ToolExecutor } from './executor.js';

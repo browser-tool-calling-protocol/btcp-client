@@ -1,17 +1,18 @@
 /**
- * Chrome Extension Example - Local Client Usage
+ * Chrome Extension Example - BTCP Client Usage
  *
- * Shows how to use BTCP client locally in a Chrome extension.
+ * Shows how to use BTCP client in a Chrome extension (local mode).
  * The agent integrates via its own interface (MCP, programmatic, etc.).
  */
 
-import { createLocalClient } from './index.js';
+import { BTCPClient } from './index.js';
 
 /**
  * Example: Set up BTCP tools in a Chrome extension
  */
 export function setupBrowserTools() {
-  const client = createLocalClient();
+  // Create client (local mode by default)
+  const client = new BTCPClient({ debug: true });
 
   // Register DOM tools
   client.registerHandler('click', async (args) => {
