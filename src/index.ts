@@ -1,42 +1,50 @@
 /**
- * BTCP Client - Browser Tool Calling Protocol Client
+ * BTCP Client - Browser Tool Calling Protocol
  *
- * A TypeScript/JavaScript client for connecting browser extensions to AI agents
- * via the Browser Tool Calling Protocol (BTCP).
+ * Two main classes:
+ * - BTCPClient: Tool PROVIDER (browser side) - registers and executes tools
+ * - ToolConsumer: Tool CONSUMER (agent side) - lists and calls tools
+ *
+ * ## Local Mode (same process - Chrome Extension)
  *
  * @example
  * ```typescript
  * import { BTCPClient } from 'btcp-client';
  *
- * const client = new BTCPClient({
- *   serverUrl: 'ws://localhost:8765',
- *   debug: true,
+ * // Provider: register tools
+ * const client = new BTCPClient();
+ * client.registerHandler('click', async (args) => {
+ *   document.querySelector(args.selector as string)?.click();
+ *   return 'clicked';
  * });
  *
- * // Register custom tool handler
- * client.getExecutor().registerHandler('myTool', async (args) => {
- *   return `Result: ${args.value}`;
- * });
+ * // Consumer: get from client
+ * const consumer = await client.getConsumer();
+ * const tools = await consumer.listTools();
+ * const result = await consumer.callTool('click', { selector: '.btn' });
+ * ```
  *
- * // Connect to server
+ * ## Remote Mode (separate processes)
+ *
+ * @example
+ * ```typescript
+ * // Browser side (tool provider)
+ * const client = new BTCPClient({ serverUrl: 'http://localhost:8765' });
+ * client.registerHandler('click', async (args) => { ... });
  * await client.connect();
  *
- * // Register tools with server
- * await client.registerTools([
- *   {
- *     name: 'myTool',
- *     description: 'A custom tool',
- *     inputSchema: {
- *       type: 'object',
- *       properties: { value: { type: 'string' } },
- *     },
- *   },
- * ]);
+ * // Agent side (tool consumer) - separate process
+ * const consumer = new ToolConsumer({ serverUrl: 'http://localhost:8765' });
+ * const tools = await consumer.listTools();
+ * const result = await consumer.callTool('click', { selector: '.btn' });
  * ```
  */
 
-// Main client
+// Tool provider (browser side)
 export { BTCPClient } from './client.js';
+
+// Tool consumer (agent side)
+export { ToolConsumer, type ToolConsumerConfig } from './consumer.js';
 
 // Tool executor
 export { ToolExecutor } from './executor.js';
@@ -83,6 +91,8 @@ export type {
   BTCPClientEventHandler,
   ToolHandler,
   ToolExecutorConfig,
+  // Local client types
+  BTCPToolCallResult,
 } from './types.js';
 
 // Errors

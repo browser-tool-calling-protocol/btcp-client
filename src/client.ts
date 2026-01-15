@@ -1,6 +1,12 @@
 /**
- * BTCP Client - HTTP Streaming client for Browser Tool Calling Protocol
- * Uses SSE for server→client, POST for client→server (more bandwidth efficient than WebSocket)
+ * BTCP Client - Tool provider for Browser Tool Calling Protocol
+ *
+ * BTCPClient is the tool PROVIDER (browser side):
+ * - Registers tool handlers
+ * - Executes tools when called
+ * - Connects to server in remote mode
+ *
+ * For the tool CONSUMER (agent side), use ToolConsumer.
  */
 
 import {
@@ -10,11 +16,12 @@ import {
   BTCPToolDefinition,
   BTCPToolCallRequest,
   BTCPToolsListRequest,
-  BTCPContent,
+  BTCPToolCallResult,
   JsonRpcRequest,
   JsonRpcResponse,
   JsonRpcNotification,
   BTCPConnectionError,
+  ToolHandler,
 } from './types.js';
 
 import {
@@ -30,9 +37,10 @@ import {
 } from './protocol.js';
 
 import { ToolExecutor } from './executor.js';
+import type { ToolConsumer } from './consumer.js';
 
 const DEFAULT_CONFIG: Required<BTCPClientConfig> = {
-  serverUrl: 'http://localhost:8765',
+  serverUrl: '',
   sessionId: '',
   version: '1.0.0',
   autoReconnect: true,
@@ -40,6 +48,7 @@ const DEFAULT_CONFIG: Required<BTCPClientConfig> = {
   maxReconnectAttempts: 5,
   connectionTimeout: 10000,
   debug: false,
+  local: true, // Default to local mode
 };
 
 // EventSource polyfill for Node.js
@@ -61,9 +70,13 @@ export class BTCPClient {
   private abortController: AbortController | null = null;
 
   constructor(config: BTCPClientConfig = {}) {
+    // Determine mode: local if no serverUrl, remote if serverUrl provided
+    const isLocal = config.local ?? !config.serverUrl;
+
     this.config = {
       ...DEFAULT_CONFIG,
       ...config,
+      local: isLocal,
       sessionId: config.sessionId || generateMessageId(),
     };
     this.executor = new ToolExecutor();
@@ -77,6 +90,22 @@ export class BTCPClient {
   }
 
   /**
+   * Register a tool handler (convenience method)
+   */
+  registerHandler(name: string, handler: (args: Record<string, unknown>) => Promise<unknown>): void {
+    this.executor.registerHandler(name, handler);
+  }
+
+  /**
+   * Get a ToolConsumer for this client (local mode)
+   */
+  async getConsumer(): Promise<ToolConsumer> {
+    // Dynamic import to avoid circular dependency
+    const { ToolConsumer } = await import('./consumer.js');
+    return new ToolConsumer({ client: this });
+  }
+
+  /**
    * Get session ID
    */
   getSessionId(): string {
@@ -84,16 +113,33 @@ export class BTCPClient {
   }
 
   /**
-   * Check if client is connected
+   * Check if client is connected (always true in local mode)
    */
   isConnected(): boolean {
+    if (this.config.local) {
+      return true;
+    }
     return this.eventSource !== null && this.eventSource.readyState === EventSource.OPEN;
   }
 
   /**
-   * Connect to the BTCP server using SSE
+   * Check if running in local mode
+   */
+  isLocal(): boolean {
+    return this.config.local;
+  }
+
+  /**
+   * Connect to the BTCP server using SSE (no-op in local mode)
    */
   async connect(): Promise<void> {
+    // Local mode: no connection needed
+    if (this.config.local) {
+      this.log('Running in local mode, no server connection needed');
+      this.emit('connect');
+      return;
+    }
+
     if (this.isConnected()) {
       return;
     }
@@ -159,6 +205,22 @@ export class BTCPClient {
         reject(new BTCPConnectionError(`Failed to connect: ${(err as Error).message}`));
       }
     });
+  }
+
+  /**
+   * Execute a tool directly (for local mode or direct invocation)
+   */
+  async execute(name: string, args: Record<string, unknown> = {}): Promise<BTCPToolCallResult> {
+    try {
+      const content = await this.executor.execute(name, args);
+      return { content, isError: false };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        content: [{ type: 'text', text: `Error: ${error.message}` }],
+        isError: true,
+      };
+    }
   }
 
   /**

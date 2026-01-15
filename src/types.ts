@@ -160,19 +160,21 @@ export interface BTCPSessionJoinRequest extends JsonRpcRequest {
 // ============================================================================
 
 export interface BTCPClientConfig {
-  /** WebSocket server URL (default: ws://localhost:8765) */
+  /** Server URL for remote mode (omit for local mode) */
   serverUrl?: string;
+  /** Run in local mode (no server, default: true if no serverUrl) */
+  local?: boolean;
   /** Client session ID (auto-generated if not provided) */
   sessionId?: string;
   /** Client version string */
   version?: string;
-  /** Auto-reconnect on disconnect */
+  /** Auto-reconnect on disconnect (remote mode only) */
   autoReconnect?: boolean;
-  /** Reconnection delay in ms */
+  /** Reconnection delay in ms (remote mode only) */
   reconnectDelay?: number;
-  /** Max reconnection attempts */
+  /** Max reconnection attempts (remote mode only) */
   maxReconnectAttempts?: number;
-  /** Connection timeout in ms */
+  /** Connection timeout in ms (remote mode only) */
   connectionTimeout?: number;
   /** Enable debug logging */
   debug?: boolean;
@@ -247,4 +249,18 @@ export class BTCPToolNotFoundError extends BTCPError {
     super(`Tool not found: ${toolName}`, -32601);
     this.name = 'BTCPToolNotFoundError';
   }
+}
+
+// ============================================================================
+// Local Client Types
+// ============================================================================
+
+/**
+ * Tool execution result
+ */
+export interface BTCPToolCallResult {
+  /** Content returned by the tool */
+  content: BTCPContent[];
+  /** Whether the result is an error */
+  isError?: boolean;
 }
