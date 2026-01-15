@@ -1,21 +1,20 @@
 /**
- * Chrome Extension Example - BTCP Client + ToolConsumer Usage
+ * Chrome Extension Example - BTCP Client Usage
  *
- * Shows the separation between:
- * - BTCPClient: Tool provider (registers handlers)
- * - ToolConsumer: Tool consumer (agent calls tools)
+ * Shows the clean API:
+ * - client.registerHandler() - register tools
+ * - client.getConsumer() - get consumer for agent
  */
 
-import { BTCPClient, ToolConsumer } from './index.js';
+import { BTCPClient } from './index.js';
 
 /**
  * Example: Set up BTCP in a Chrome extension
  */
-export function setup() {
-  // === PROVIDER SIDE (browser/content script) ===
+export async function setup() {
+  // Create client and register tools
   const client = new BTCPClient({ debug: true });
 
-  // Register tool handlers
   client.registerHandler('click', async (args) => {
     const el = document.querySelector(args.selector as string) as HTMLElement;
     if (!el) throw new Error(`Element not found: ${args.selector}`);
@@ -36,8 +35,8 @@ export function setup() {
     title: document.title,
   }));
 
-  // === CONSUMER SIDE (agent) ===
-  const consumer = new ToolConsumer({ client });
+  // Get consumer for agent
+  const consumer = await client.getConsumer();
 
   return { client, consumer };
 }
@@ -45,9 +44,9 @@ export function setup() {
 /**
  * Example usage:
  *
- * const { client, consumer } = setup();
+ * const { consumer } = await setup();
  *
- * // Agent uses consumer to interact with tools
+ * // Agent uses consumer
  * const tools = await consumer.listTools();
  * const result = await consumer.callTool('click', { selector: '.btn' });
  */

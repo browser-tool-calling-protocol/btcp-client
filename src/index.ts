@@ -9,7 +9,7 @@
  *
  * @example
  * ```typescript
- * import { BTCPClient, ToolConsumer } from 'btcp-client';
+ * import { BTCPClient } from 'btcp-client';
  *
  * // Provider: register tools
  * const client = new BTCPClient();
@@ -18,8 +18,8 @@
  *   return 'clicked';
  * });
  *
- * // Consumer: call tools (agent uses this)
- * const consumer = new ToolConsumer({ client });
+ * // Consumer: get from client
+ * const consumer = await client.getConsumer();
  * const tools = await consumer.listTools();
  * const result = await consumer.callTool('click', { selector: '.btn' });
  * ```

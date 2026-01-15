@@ -37,6 +37,7 @@ import {
 } from './protocol.js';
 
 import { ToolExecutor } from './executor.js';
+import type { ToolConsumer } from './consumer.js';
 
 const DEFAULT_CONFIG: Required<BTCPClientConfig> = {
   serverUrl: '',
@@ -93,6 +94,15 @@ export class BTCPClient {
    */
   registerHandler(name: string, handler: (args: Record<string, unknown>) => Promise<unknown>): void {
     this.executor.registerHandler(name, handler);
+  }
+
+  /**
+   * Get a ToolConsumer for this client (local mode)
+   */
+  async getConsumer(): Promise<ToolConsumer> {
+    // Dynamic import to avoid circular dependency
+    const { ToolConsumer } = await import('./consumer.js');
+    return new ToolConsumer({ client: this });
   }
 
   /**
