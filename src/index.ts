@@ -43,6 +43,9 @@
 // Tool provider (browser side)
 export { BTCPClient } from './client.js';
 
+// Socket Native client (WebSocket-based)
+export { SocketNativeClient, type SocketNativeClientConfig } from './socket-native-client.js';
+
 // Tool consumer (agent side)
 export { ToolConsumer, type ToolConsumerConfig } from './consumer.js';
 
