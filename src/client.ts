@@ -4,9 +4,38 @@
  * BTCPClient is the tool PROVIDER (browser side):
  * - Registers tool handlers
  * - Executes tools when called
- * - Connects to server in remote mode
+ * - Connects to server via pluggable transport
  *
  * For the tool CONSUMER (agent side), use ToolConsumer.
+ *
+ * @example Local mode (no transport):
+ * ```typescript
+ * const client = new BTCPClient({ debug: true });
+ * client.registerHandler('greet', async (args) => `Hello, ${args.name}!`);
+ * const result = await client.execute('greet', { name: 'World' });
+ * ```
+ *
+ * @example Remote mode with WebSocket:
+ * ```typescript
+ * import { BTCPClient, WebSocketTransport } from 'btcp-client';
+ *
+ * const client = new BTCPClient({
+ *   transport: new WebSocketTransport({ url: 'ws://localhost:8765' }),
+ *   debug: true,
+ * });
+ * await client.connect();
+ * ```
+ *
+ * @example Remote mode with HTTP Streaming:
+ * ```typescript
+ * import { BTCPClient, HttpStreamingTransport } from 'btcp-client';
+ *
+ * const client = new BTCPClient({
+ *   transport: new HttpStreamingTransport({ url: 'http://localhost:8765' }),
+ *   debug: true,
+ * });
+ * await client.connect();
+ * ```
  */
 
 import {
@@ -21,7 +50,6 @@ import {
   JsonRpcResponse,
   JsonRpcNotification,
   BTCPConnectionError,
-  ToolHandler,
 } from './types.js';
 
 import {
@@ -38,9 +66,17 @@ import {
 
 import { ToolExecutor } from './executor.js';
 import type { ToolConsumer } from './consumer.js';
+import type { Transport } from './transport/types.js';
 
-const DEFAULT_CONFIG: Required<BTCPClientConfig> = {
-  serverUrl: '',
+/**
+ * Extended client configuration with transport support
+ */
+export interface BTCPClientOptions extends Omit<BTCPClientConfig, 'serverUrl' | 'local'> {
+  /** Transport to use for remote communication (omit for local mode) */
+  transport?: Transport;
+}
+
+const DEFAULT_CONFIG = {
   sessionId: '',
   version: '1.0.0',
   autoReconnect: true,
@@ -48,15 +84,11 @@ const DEFAULT_CONFIG: Required<BTCPClientConfig> = {
   maxReconnectAttempts: 5,
   connectionTimeout: 10000,
   debug: false,
-  local: true, // Default to local mode
 };
 
-// EventSource polyfill for Node.js
-let EventSourceImpl: typeof EventSource;
-
 export class BTCPClient {
-  private config: Required<BTCPClientConfig>;
-  private eventSource: EventSource | null = null;
+  private config: typeof DEFAULT_CONFIG & { sessionId: string };
+  private transport: Transport | null;
   private eventHandlers: Map<keyof BTCPClientEvents, Set<Function>> = new Map();
   private pendingRequests: Map<string | number, {
     resolve: (value: JsonRpcResponse) => void;
@@ -64,22 +96,61 @@ export class BTCPClient {
     timeout: ReturnType<typeof setTimeout>;
   }> = new Map();
   private reconnectAttempts = 0;
-  private isConnecting = false;
   private executor: ToolExecutor;
   private registeredTools: BTCPToolDefinition[] = [];
-  private abortController: AbortController | null = null;
 
-  constructor(config: BTCPClientConfig = {}) {
-    // Determine mode: local if no serverUrl, remote if serverUrl provided
-    const isLocal = config.local ?? !config.serverUrl;
-
+  constructor(config: BTCPClientOptions = {}) {
     this.config = {
       ...DEFAULT_CONFIG,
       ...config,
-      local: isLocal,
       sessionId: config.sessionId || generateMessageId(),
     };
+    this.transport = config.transport || null;
     this.executor = new ToolExecutor();
+
+    // Setup transport event handlers
+    if (this.transport) {
+      this.setupTransportHandlers();
+    }
+  }
+
+  /**
+   * Setup event handlers for the transport
+   */
+  private setupTransportHandlers(): void {
+    if (!this.transport) return;
+
+    this.transport.on('connect', () => {
+      this.reconnectAttempts = 0;
+      this.log('Connected to server');
+      this.emit('connect');
+    });
+
+    this.transport.on('disconnect', (code, reason) => {
+      this.log(`Disconnected: ${code} ${reason}`);
+      this.emit('disconnect', code, reason);
+
+      // Clear pending requests
+      for (const [id, pending] of this.pendingRequests) {
+        clearTimeout(pending.timeout);
+        pending.reject(new BTCPConnectionError('Connection lost'));
+      }
+      this.pendingRequests.clear();
+
+      // Auto-reconnect if enabled
+      if (this.config.autoReconnect && this.reconnectAttempts < this.config.maxReconnectAttempts) {
+        this.handleReconnect();
+      }
+    });
+
+    this.transport.on('error', (error) => {
+      this.log('Transport error:', error);
+      this.emit('error', error);
+    });
+
+    this.transport.on('message', (data) => {
+      this.handleMessage(data);
+    });
   }
 
   /**
@@ -116,25 +187,25 @@ export class BTCPClient {
    * Check if client is connected (always true in local mode)
    */
   isConnected(): boolean {
-    if (this.config.local) {
+    if (this.isLocal()) {
       return true;
     }
-    return this.eventSource !== null && this.eventSource.readyState === EventSource.OPEN;
+    return this.transport?.isConnected() ?? false;
   }
 
   /**
-   * Check if running in local mode
+   * Check if running in local mode (no transport)
    */
   isLocal(): boolean {
-    return this.config.local;
+    return this.transport === null;
   }
 
   /**
-   * Connect to the BTCP server using SSE (no-op in local mode)
+   * Connect to the server (no-op in local mode)
    */
   async connect(): Promise<void> {
     // Local mode: no connection needed
-    if (this.config.local) {
+    if (this.isLocal()) {
       this.log('Running in local mode, no server connection needed');
       this.emit('connect');
       return;
@@ -144,67 +215,7 @@ export class BTCPClient {
       return;
     }
 
-    if (this.isConnecting) {
-      throw new BTCPConnectionError('Connection already in progress');
-    }
-
-    this.isConnecting = true;
-    this.abortController = new AbortController();
-
-    // Ensure EventSource is available
-    await this.ensureEventSource();
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.isConnecting = false;
-        reject(new BTCPConnectionError('Connection timeout'));
-      }, this.config.connectionTimeout);
-
-      try {
-        const sseUrl = `${this.config.serverUrl}/events?sessionId=${encodeURIComponent(this.config.sessionId)}&clientType=browser&version=${this.config.version}`;
-
-        this.eventSource = new EventSourceImpl(sseUrl);
-
-        this.eventSource.onopen = () => {
-          clearTimeout(timeout);
-          this.isConnecting = false;
-          this.reconnectAttempts = 0;
-          this.log('Connected to BTCP server via SSE');
-          this.emit('connect');
-          resolve();
-        };
-
-        this.eventSource.onerror = (event) => {
-          clearTimeout(timeout);
-          if (this.isConnecting) {
-            this.isConnecting = false;
-            const error = new BTCPConnectionError('SSE connection error');
-            this.emit('error', error);
-            reject(error);
-          } else {
-            this.handleDisconnect();
-          }
-        };
-
-        this.eventSource.onmessage = (event) => {
-          this.handleMessage(event.data);
-        };
-
-        // Listen for specific event types
-        this.eventSource.addEventListener('request', (event) => {
-          this.handleMessage((event as MessageEvent).data);
-        });
-
-        this.eventSource.addEventListener('response', (event) => {
-          this.handleMessage((event as MessageEvent).data);
-        });
-
-      } catch (err) {
-        clearTimeout(timeout);
-        this.isConnecting = false;
-        reject(new BTCPConnectionError(`Failed to connect: ${(err as Error).message}`));
-      }
-    });
+    await this.transport!.connect();
   }
 
   /**
@@ -224,39 +235,13 @@ export class BTCPClient {
   }
 
   /**
-   * Ensure EventSource is available (polyfill for Node.js)
-   */
-  private async ensureEventSource(): Promise<void> {
-    if (typeof globalThis.EventSource !== 'undefined') {
-      EventSourceImpl = globalThis.EventSource;
-      return;
-    }
-
-    // Node.js environment - use eventsource package
-    try {
-      const { default: EventSource } = await import('eventsource');
-      EventSourceImpl = EventSource as unknown as typeof globalThis.EventSource;
-    } catch {
-      throw new BTCPConnectionError(
-        'EventSource not available. Install eventsource package: npm install eventsource'
-      );
-    }
-  }
-
-  /**
    * Disconnect from the server
    */
   disconnect(): void {
     this.config.autoReconnect = false;
 
-    if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
-    }
-
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
+    if (this.transport) {
+      this.transport.disconnect();
     }
 
     // Clear pending requests
@@ -265,12 +250,10 @@ export class BTCPClient {
       pending.reject(new BTCPConnectionError('Client disconnected'));
     }
     this.pendingRequests.clear();
-
-    this.emit('disconnect', 1000, 'Client disconnected');
   }
 
   /**
-   * Send a JSON-RPC request via HTTP POST and wait for response
+   * Send a JSON-RPC request and wait for response
    */
   async sendRequest(
     method: string,
@@ -295,7 +278,7 @@ export class BTCPClient {
         timeout: timeoutId,
       });
 
-      this.postMessage(request).catch((err) => {
+      this.sendRaw(request).catch((err) => {
         this.pendingRequests.delete(request.id);
         clearTimeout(timeoutId);
         reject(err);
@@ -304,45 +287,25 @@ export class BTCPClient {
   }
 
   /**
-   * Send a message via HTTP POST (no response expected)
+   * Send a message (no response expected)
    */
   async send(message: JsonRpcRequest | JsonRpcResponse | JsonRpcNotification): Promise<void> {
-    await this.postMessage(message);
+    await this.sendRaw(message);
   }
 
   /**
-   * Post a message to the server via HTTP
+   * Send raw message via transport
    */
-  private async postMessage(
+  private async sendRaw(
     message: JsonRpcRequest | JsonRpcResponse | JsonRpcNotification
   ): Promise<void> {
-    const url = `${this.config.serverUrl}/message`;
-    const body = serializeMessage(message);
-
-    this.log('Sending:', body);
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Session-ID': this.config.sessionId,
-      },
-      body,
-      signal: this.abortController?.signal,
-    });
-
-    if (!response.ok) {
-      throw new BTCPConnectionError(`HTTP error: ${response.status}`);
+    if (!this.transport) {
+      throw new BTCPConnectionError('No transport configured (local mode)');
     }
 
-    // Check if there's a response body
-    const text = await response.text();
-    if (text) {
-      const parsed = parseMessage(text);
-      if (parsed && isResponse(parsed)) {
-        this.handleResponseMessage(parsed);
-      }
-    }
+    const data = serializeMessage(message);
+    this.log('Sending:', data);
+    await this.transport.send(data);
   }
 
   /**
@@ -358,7 +321,7 @@ export class BTCPClient {
       }
     }
 
-    if (this.isConnected()) {
+    if (this.isConnected() && !this.isLocal()) {
       await this.sendRequest('tools/register', { tools });
     }
   }
@@ -413,7 +376,7 @@ export class BTCPClient {
   }
 
   /**
-   * Handle incoming SSE message
+   * Handle incoming message from transport
    */
   private handleMessage(data: string): void {
     this.log('Received:', data);
@@ -508,30 +471,25 @@ export class BTCPClient {
   }
 
   /**
-   * Handle disconnect and auto-reconnect
+   * Handle auto-reconnection
    */
-  private handleDisconnect(): void {
-    this.eventSource = null;
-    this.emit('disconnect', 0, 'Connection lost');
-
-    if (!this.config.autoReconnect) {
-      return;
-    }
-
-    if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
-      this.log('Max reconnect attempts reached');
-      return;
-    }
-
+  private handleReconnect(): void {
     this.reconnectAttempts++;
     const delay = this.config.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
     this.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
 
     setTimeout(() => {
-      this.connect().catch((err) => {
-        this.log('Reconnection failed:', err);
-      });
+      this.connect()
+        .then(() => {
+          // Re-register tools after reconnection
+          if (this.registeredTools.length > 0) {
+            return this.registerTools(this.registeredTools);
+          }
+        })
+        .catch((err) => {
+          this.log('Reconnection failed:', err);
+        });
     }, delay);
   }
 

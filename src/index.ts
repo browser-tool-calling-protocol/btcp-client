@@ -24,33 +24,63 @@
  * const result = await consumer.callTool('click', { selector: '.btn' });
  * ```
  *
- * ## Remote Mode (separate processes)
+ * ## Remote Mode with WebSocket
  *
  * @example
  * ```typescript
- * // Browser side (tool provider)
- * const client = new BTCPClient({ serverUrl: 'http://localhost:8765' });
- * client.registerHandler('click', async (args) => { ... });
- * await client.connect();
+ * import { BTCPClient, WebSocketTransport } from 'btcp-client';
  *
- * // Agent side (tool consumer) - separate process
- * const consumer = new ToolConsumer({ serverUrl: 'http://localhost:8765' });
- * const tools = await consumer.listTools();
- * const result = await consumer.callTool('click', { selector: '.btn' });
+ * const client = new BTCPClient({
+ *   transport: new WebSocketTransport({ url: 'ws://localhost:8765' }),
+ *   debug: true,
+ * });
+ *
+ * client.registerHandler('greet', async (args) => `Hello, ${args.name}!`);
+ * await client.connect();
+ * await client.registerTools([
+ *   { name: 'greet', description: 'Greet a person', inputSchema: { type: 'object' } }
+ * ]);
+ * ```
+ *
+ * ## Remote Mode with HTTP Streaming (SSE + POST)
+ *
+ * @example
+ * ```typescript
+ * import { BTCPClient, HttpStreamingTransport } from 'btcp-client';
+ *
+ * const client = new BTCPClient({
+ *   transport: new HttpStreamingTransport({ url: 'http://localhost:8765' }),
+ *   debug: true,
+ * });
+ *
+ * await client.connect();
  * ```
  */
 
 // Tool provider (browser side)
-export { BTCPClient } from './client.js';
-
-// Socket Native client (WebSocket-based)
-export { SocketNativeClient, type SocketNativeClientConfig } from './socket-native-client.js';
+export { BTCPClient, type BTCPClientOptions } from './client.js';
 
 // Tool consumer (agent side)
 export { ToolConsumer, type ToolConsumerConfig } from './consumer.js';
 
 // Tool executor
 export { ToolExecutor } from './executor.js';
+
+// Transport layer
+export {
+  // Types
+  type Transport,
+  type TransportConfig,
+  type TransportEvents,
+  type TransportEventHandler,
+  type WebSocketTransportConfig,
+  type HttpStreamingTransportConfig,
+  // Base class (for custom implementations)
+  BaseTransport,
+  // Transport implementations
+  WebSocketTransport,
+  HttpStreamingTransport,
+} from './transport/index.js';
 
 // Protocol utilities
 export {
@@ -94,7 +124,6 @@ export type {
   BTCPClientEventHandler,
   ToolHandler,
   ToolExecutorConfig,
-  // Local client types
   BTCPToolCallResult,
 } from './types.js';
 
