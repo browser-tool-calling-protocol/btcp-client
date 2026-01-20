@@ -2,23 +2,46 @@
  * BTCP Client Example
  *
  * This example shows how to:
- * 1. Create a BTCP client
+ * 1. Create a BTCP client with a transport
  * 2. Register custom tool handlers
  * 3. Connect to a BTCP server
  * 4. Handle tool invocations from AI agents
+ *
+ * Usage:
+ *   # With HTTP Streaming (default):
+ *   BTCP_SERVER_URL=http://localhost:8765 node dist/example.js
+ *
+ *   # With WebSocket:
+ *   BTCP_TRANSPORT=websocket BTCP_SERVER_URL=ws://localhost:8765 node dist/example.js
  */
 
-import { BTCPClient, BTCPToolDefinition, createTextContent } from './index.js';
+import {
+  BTCPClient,
+  WebSocketTransport,
+  HttpStreamingTransport,
+  BTCPToolDefinition,
+  createTextContent,
+} from './index.js';
 
 async function main() {
-  // Create client with debug logging
+  // Determine transport type from environment
+  const transportType = process.env.BTCP_TRANSPORT || 'http';
+  const serverUrl = process.env.BTCP_SERVER_URL || 'http://localhost:8765';
+
+  // Create transport based on configuration
+  const transport = transportType === 'websocket'
+    ? new WebSocketTransport({ url: serverUrl, debug: true })
+    : new HttpStreamingTransport({ url: serverUrl, debug: true });
+
+  // Create client with transport
   const client = new BTCPClient({
-    serverUrl: process.env.BTCP_SERVER_URL || 'http://localhost:8765',
+    transport,
     debug: true,
     autoReconnect: true,
   });
 
   console.log(`Session ID: ${client.getSessionId()}`);
+  console.log(`Transport: ${transportType}`);
 
   // Get the executor to register custom handlers
   const executor = client.getExecutor();
